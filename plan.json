@@ -1,6 +1,6 @@
 {
   "check_interval_seconds": 5,
-  "dry_run": true,
+  "dry_run": false,
   "work_blocks": [
     { "days": ["mon", "tue", "wed", "thu", "fri"], "start": "10:00", "end": "13:30" },
     { "days": ["mon", "tue", "wed", "thu", "fri"], "start": "14:30", "end": "18:00" }

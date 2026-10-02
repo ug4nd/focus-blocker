@@ -75,7 +75,7 @@ def _parse_names(data: dict, key: str) -> frozenset[str]:
 
 def load_plan(path: Path) -> Plan:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
         raise ValueError(f"config not found: {path}") from None
     except json.JSONDecodeError as e:
