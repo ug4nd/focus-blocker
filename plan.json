@@ -13,7 +13,9 @@
     "brave.exe",
     "steam.exe",
     "steamwebhelper.exe",
-    "discord.exe"
+    "discord.exe",
+    "zen.exe",
+    "notepad.exe"
   ],
   "whitelist": [
     "vmware.exe",

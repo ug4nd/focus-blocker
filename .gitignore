@@ -3,5 +3,8 @@ __pycache__/
 .venv/
 venv/
 *.log
+unlock.flag
+unlock.tmp
+blocker.lock
 .vscode/
 .idea/

@@ -6,10 +6,12 @@ import argparse
 import json
 import logging
 import os
+import secrets
+import string
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, time as dtime
+from datetime import date, datetime, time as dtime
 from pathlib import Path
 
 import psutil
@@ -30,7 +32,15 @@ PROTECTED = frozenset(
 
 TERMINATE_TIMEOUT = 3.0
 
-log = logging.getLogger("blocker")
+BASE_DIR = Path(__file__).resolve().parent
+UNLOCK_FLAG = BASE_DIR / "unlock.flag"
+LOCK_FILE = BASE_DIR / "blocker.lock"
+UNLOCK_CODE_LENGTH = 30
+UNLOCK_DELAY_SECONDS = 300
+# No look-alike characters (0/O, 1/l/I) so the code can be retyped by eye.
+UNLOCK_ALPHABET = "".join(c for c in string.ascii_letters + string.digits if c not in "0O1lI")
+
+log =logging.getLogger("blocker")
 
 
 @dataclass(frozen=True)
@@ -174,21 +184,117 @@ def sweep(plan: Plan) -> int:
     return count
 
 
+def is_unlocked_today() -> bool:
+    """True if unlock.flag holds today's date. A stale or malformed flag is removed;
+    an unreadable one counts as 'not unlocked' so blocking stays on."""
+    try:
+        text = UNLOCK_FLAG.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        log.warning("cannot read %s: %s", UNLOCK_FLAG.name, e)
+        return False
+    if text == date.today().isoformat():
+        return True
+    try:
+        UNLOCK_FLAG.unlink()
+        log.info("stale %s removed", UNLOCK_FLAG.name)
+    except OSError:
+        pass
+    return False
+
+
+def write_unlock_flag() -> None:
+    tmp = UNLOCK_FLAG.with_suffix(".tmp")
+    tmp.write_text(date.today().isoformat(), encoding="utf-8")
+    os.replace(tmp, UNLOCK_FLAG)  # atomic: the main loop never sees a half-written flag
+
+
+def unlock() -> int:
+    """Ask for a random code, wait out a cancellable countdown, then create unlock.flag."""
+    log.info("unlock requested")
+    code = "".join(secrets.choice(UNLOCK_ALPHABET) for _ in range(UNLOCK_CODE_LENGTH))
+    try:
+        print(f"Type this code exactly to continue:\n\n    {code}\n")
+        if input("> ").strip() != code:
+            log.warning("unlock failed: wrong code")
+            return 1
+        deadline = time.monotonic() + UNLOCK_DELAY_SECONDS
+        while (left := deadline - time.monotonic()) > 0:
+            secs = int(left) + 1
+            print(f"\rUnlocking in {secs // 60}:{secs % 60:02d}  (Ctrl+C to cancel)  ", end="", flush=True)
+            time.sleep(min(1.0, left))
+        print()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        log.info("unlock cancelled")
+        return 1
+    write_unlock_flag()
+    log.info("unlock activated: blocking paused until midnight")
+    return 0
+
+
+def _lock_holder_alive() -> bool:
+    """True if blocker.lock names a live process. The PID alone is not trusted because
+    Windows reuses PIDs, so the process creation time is compared as well."""
+    try:
+        info = json.loads(LOCK_FILE.read_text(encoding="utf-8"))
+        proc = psutil.Process(int(info["pid"]))
+        return abs(proc.create_time() - float(info["created"])) < 1.0
+    except (OSError, ValueError, KeyError, TypeError, psutil.Error):
+        return False  # missing, corrupt or dead holder: the lock is stale
+
+
+def acquire_lock() -> bool:
+    for _ in range(2):
+        try:
+            fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if _lock_holder_alive():
+                return False
+            try:
+                LOCK_FILE.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return False
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"pid": os.getpid(), "created": psutil.Process().create_time()}, f)
+        return True
+    return False
+
+
+def release_lock() -> None:
+    try:
+        if json.loads(LOCK_FILE.read_text(encoding="utf-8")).get("pid") == os.getpid():
+            LOCK_FILE.unlink()
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
 def run(plan: Plan, once: bool) -> None:
     if plan.dry_run:
         log.info("DRY RUN: processes will only be reported, not closed")
     if not plan.blocks:
         log.warning("no work blocks defined, nothing will ever be blocked")
     was_working = False
+    was_unlocked = False
     while True:
         working = is_work_time(plan, datetime.now())
         if working != was_working:
             log.info("work block started" if working else "work block ended")
             was_working = working
-        if working:
+        unlocked = is_unlocked_today()
+        if unlocked != was_unlocked:
+            log.info("unlock detected: blocking paused until midnight" if unlocked
+                     else "unlock expired: blocking resumed")
+            was_unlocked = unlocked
+        if working and not unlocked:
             sweep(plan)
         elif once:
-            log.info("not in a work block, nothing to do")
+            log.info("unlocked for today, nothing to do" if unlocked
+                     else "not in a work block, nothing to do")
         if once:
             return
         time.sleep(plan.interval)
@@ -198,6 +304,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name("plan.json"))
     parser.add_argument("--once", action="store_true", help="single check instead of a loop")
+    parser.add_argument("--unlock", action="store_true",
+                        help="pause blocking until midnight (random code + 5 minute countdown)")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -209,16 +317,30 @@ def main() -> int:
         ],
     )
 
+    if args.unlock:
+        return unlock()
+
     try:
         plan = load_plan(args.config)
     except ValueError as e:
         log.error("%s", e)
         return 1
 
+    # --once is a one-shot check and may run next to the main instance.
+    locked = False
+    if not args.once:
+        if not acquire_lock():
+            log.error("blocker is already running (see %s), exiting", LOCK_FILE.name)
+            return 1
+        locked = True
+
     try:
         run(plan, args.once)
     except KeyboardInterrupt:
         log.info("stopped")
+    finally:
+        if locked:
+            release_lock()
     return 0
 
 
