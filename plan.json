@@ -1,0 +1,28 @@
+{
+  "check_interval_seconds": 5,
+  "dry_run": true,
+  "work_blocks": [
+    { "days": ["mon", "tue", "wed", "thu", "fri"], "start": "10:00", "end": "13:30" },
+    { "days": ["mon", "tue", "wed", "thu", "fri"], "start": "14:30", "end": "18:00" }
+  ],
+  "blacklist": [
+    "chrome.exe",
+    "msedge.exe",
+    "firefox.exe",
+    "opera.exe",
+    "brave.exe",
+    "steam.exe",
+    "steamwebhelper.exe",
+    "discord.exe"
+  ],
+  "whitelist": [
+    "vmware.exe",
+    "vmware-vmx.exe",
+    "vmware-authd.exe",
+    "vmnat.exe",
+    "vmnetdhcp.exe",
+    "vlc.exe",
+    "throne.exe",
+    "claude.exe"
+  ]
+}
